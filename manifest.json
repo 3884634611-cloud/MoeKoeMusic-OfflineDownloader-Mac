@@ -1,0 +1,74 @@
+{
+  "manifest_version": 3,
+  "name": "离线下载器 (macOS)",
+  "plugin_id": "offline-downloader-mac",
+  "version": "1.0.0",
+  "description": "macOS 移植版离线下载器：单曲 + 歌单批量下载到本地，支持标准/高品/无损/Hi-Res 四档音质；本地宿主直接写盘到 ~/Music/MoeKoeMusic，不弹保存框，存完离线可播。基于 gaozil996 原版离线下载器移植。",
+  "moekoe": true,
+  "minversion": "1.7.0",
+  "author": {
+    "name": "SHIYI (original) · macOS port",
+    "url": "https://github.com/gaozil996/MoeKoeMusic-OfflineDownloader"
+  },
+  "permissions": [
+    "storage"
+  ],
+  "moekoe_permissions": [
+    "moekoe:nativeHost",
+    "moekoe:apiMode"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "file:///*"
+      ],
+      "js": [
+        "local-index.js",
+        "content.js"
+      ],
+      "css": [
+        "styles.css"
+      ],
+      "run_at": "document_start"
+    }
+  ],
+  "moekoe_native_hosts": [
+    {
+      "id": "offline-dl-saver",
+      "auto_start": true,
+      "bridge": "bridge.html",
+      "platforms": {
+        "darwin": {
+          "path": "host/offline-dl-saver",
+          "args": []
+        },
+        "linux": {
+          "path": "host/offline-dl-saver",
+          "args": []
+        }
+      }
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "bridge.html",
+        "bridge.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ],
+  "icons": {
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

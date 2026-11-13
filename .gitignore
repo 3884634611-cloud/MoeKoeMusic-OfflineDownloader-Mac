@@ -1,0 +1,4 @@
+*.part
+.DS_Store
+*.log
+host/*.test
