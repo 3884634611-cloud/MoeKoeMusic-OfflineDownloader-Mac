@@ -57,6 +57,8 @@ html.dark .odl-toggle {
   margin-bottom: 10px;
   padding-bottom: 9px;
   border-bottom: 1px solid rgba(0, 0, 0, .08);
+  cursor: move;
+  user-select: none;
 }
 
 .odl-title {

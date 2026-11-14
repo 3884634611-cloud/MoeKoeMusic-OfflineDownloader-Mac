@@ -2,7 +2,6 @@
   'use strict';
 
   var P = '[OfflineDL]';
-  var API_BASE = 'http://127.0.0.1:6520';
   var STORE_KEY = 'offline_dl_state';
 
   // Order matters and so do the tags. matchVariant returns the FIRST tag hit,
@@ -65,16 +64,47 @@
     try { localStorage.setItem(STORE_KEY, JSON.stringify({ quality: ui.quality, mode: ui.mode })); } catch (e) {}
   }
 
-  function getApiBase() {
+  // —— 主世界桥接 ——
+  // content script 运行在隔离世界，访问不到 preload 挂在主世界的 kugouapi。
+  // 这里把 main-bridge.js 以 <script> 标签注入主世界，经 postMessage 转发请求。
+  var bridgeSeq = 0;
+  var bridgePending = {};
+
+  function injectBridge() {
     try {
-      var s = JSON.parse(localStorage.getItem('settings') || '{}');
-      var custom = (s.apiBaseUrl || '').toString().trim().replace(/\/+$/, '');
-      if (custom && /^https?:\/\//.test(custom)) return custom;
-    } catch (e) {}
-    return API_BASE;
+      if (document.getElementById('odl-main-bridge')) return;
+      var s = document.createElement('script');
+      s.id = 'odl-main-bridge';
+      s.src = chrome.runtime.getURL('main-bridge.js');
+      s.onload = function () { try { s.remove(); } catch (e) {} };
+      (document.head || document.documentElement).appendChild(s);
+    } catch (e) { warn('桥接脚本注入失败', e.message); }
   }
 
-  function getAuthHeaders() {
+  function bridgeRequest(path, payload) {
+    return new Promise(function (resolve, reject) {
+      var id = ++bridgeSeq;
+      bridgePending[id] = { resolve: resolve, reject: reject };
+      var onMsg = function (ev) {
+        var d = ev.data;
+        if (!d || d.__odl !== 'bridge-res' || d.id !== id) return;
+        delete bridgePending[id];
+        clearTimeout(timer);
+        window.removeEventListener('message', onMsg);
+        if (d.payload && d.payload.__err) reject(new Error(d.payload.__err));
+        else resolve(d.payload && d.payload.res);
+      };
+      var timer = setTimeout(function () {
+        delete bridgePending[id];
+        window.removeEventListener('message', onMsg);
+        reject(new Error('桥接请求超时: ' + path));
+      }, 12000);
+      window.addEventListener('message', onMsg);
+      window.postMessage({ __odl: 'bridge-req', id: id, path: path, payload: payload || {} }, '*');
+    });
+  }
+
+  function buildAuthHeader() {
     try {
       var moe = JSON.parse(localStorage.getItem('MoeData') || '{}');
       var user = moe.UserInfo || {};
@@ -88,23 +118,37 @@
       if (device.guid) parts.push('KUGOU_API_GUID=' + device.guid);
       if (device.serverDev) parts.push('KUGOU_API_DEV=' + device.serverDev);
       if (device.mac) parts.push('KUGOU_API_MAC=' + device.mac);
-      return parts.length ? { Authorization: parts.join(';') } : {};
-    } catch (e) { return {}; }
+      return parts.length ? parts.join(';') : '';
+    } catch (e) { return ''; }
   }
 
   async function apiGet(path, params) {
-    var url = new URL(path, getApiBase());
     params = params || {};
+    var qs = new URLSearchParams();
     Object.keys(params).forEach(function (k) {
-      if (params[k] !== undefined && params[k] !== null && params[k] !== '') url.searchParams.set(k, params[k]);
+      if (params[k] !== undefined && params[k] !== null && params[k] !== '') qs.set(k, params[k]);
     });
-    var resp = await fetch(url.toString(), {
-      method: 'GET',
-      headers: Object.assign({ 'Content-Type': 'application/json' }, getAuthHeaders()),
-      credentials: 'include'
-    });
-    if (!resp.ok) throw new Error('HTTP ' + resp.status);
-    return resp.json();
+    var query = qs.toString();
+    var fullPath = query ? path + '?' + query : path;
+
+    // 走主世界桥接 → 内置 kugouapi：不占端口、无 CORS，设备标识由客户端
+    // 自动注入；登录票据从 localStorage 取出随 headers 带上。
+    injectBridge();
+    var payload = {};
+    var auth = buildAuthHeader();
+    if (auth) payload.headers = { Authorization: auth };
+
+    var res = await bridgeRequest(fullPath, payload);
+    if (res instanceof Error) throw res;
+    if (!res) throw new Error('空响应: ' + path);
+    if (res.status === 404) throw new Error('内置接口 404: ' + path);
+
+    // 内置返回 { status, body }：把 body 业务数据摊到外层，兼容旧代码读 r.data。
+    var body = res.body !== undefined ? res.body : res;
+    var out = (body && typeof body === 'object') ? Object.assign({}, body) : { data: body };
+    // 内置成功 status=200，旧 HTTP 成功 status=1，归一为 1 供下游统一判断。
+    out.status = (res.status === 200 || res.status === 1) ? 1 : res.status;
+    return out;
   }
 
   function getCurrentSong() {
@@ -137,12 +181,18 @@
   function songInfo(song) {
     if (!song) return null;
 
-    var artist = pick(song, ['author', 'artist', 'singer', 'authors', 'AuthorName']);
+    var artist = pick(song, ['author', 'artist', 'singer', 'authors', 'AuthorName', 'SingerName', 'author_name']);
     if (!artist && Array.isArray(song.singerinfo)) {
       var names = song.singerinfo
         .map(function (x) { return x && (x.name || x.singer_name); })
         .filter(Boolean);
       if (names.length) artist = names.join('/');
+    }
+    if (!artist && Array.isArray(song.authors)) {
+      var anames = song.authors
+        .map(function (x) { return x && (x.author_name || x.name || x.singer_name); })
+        .filter(Boolean);
+      if (anames.length) artist = anames.join('/');
     }
     if (!artist && song.singerinfo && song.singerinfo.name) artist = song.singerinfo.name;
 
@@ -162,12 +212,26 @@
       goods.push({ hash: g.hash, quality: qid, bitrate: br });
     });
 
+    var mainHash = pick(song, ['hash', 'playHash', 'FileHash', 'file_hash', '270hash', 'orig_hash', 'HQFileHash']);
+    if (!mainHash && song.deprecated && song.deprecated.hash) mainHash = song.deprecated.hash;
+
+    var title = pick(song, ['name', 'title', 'songname', 'filename', 'SongName', 'song_name']) || '未知歌曲';
+    // 部分歌单接口返回的歌名本身已带「歌手 - 歌名」前缀；若前缀与解析出的歌手一致，
+    // 剥掉，避免落盘文件名里歌手重复出现两次。
+    if (artist) {
+      var prefixMatch = String(title).match(/^([^\-–—]+?)\s*[\-–—]\s*(.+)$/);
+      if (prefixMatch && normText(prefixMatch[1]) === normText(artist)) {
+        title = prefixMatch[2].trim();
+      }
+    }
+
     return {
-      hash: pick(song, ['hash', 'playHash', 'FileHash', 'file_hash', '270hash', 'orig_hash']),
-      title: pick(song, ['name', 'title', 'songname', 'filename', 'SongName', 'song_name']) || '未知歌曲',
+      hash: mainHash,
+      title: title,
       artist: artist || '未知歌手',
       album: album || '',
-      img: pick(song, ['img', 'pic', 'cover', 'album_img', 'picture']),
+      img: pick(song, ['img', 'pic', 'cover', 'album_img', 'picture', 'union_cover']) ||
+        (song.trans_param && song.trans_param.union_cover) || '',
       goods: goods
     };
   }
@@ -327,6 +391,7 @@
   var live = { on: false, received: 0, total: 0, percent: 0, name: '' };
   var nhDiag = [];
 
+  if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
   chrome.runtime.onMessage.addListener(function (request) {
     if (!request) return;
 
@@ -356,6 +421,7 @@
     live.percent = p.percent || 0;
     renderLiveProgress();
   });
+  }
 
   var nhPending = {};
 
@@ -554,7 +620,8 @@
       var v = i >= 0 ? kv.slice(i + 1) : '';
       try { params[k] = decodeURIComponent(v); } catch (e) { params[k] = v; }
     });
-    return { path: path, params: params, isPlaylistDetail: path.indexOf('playlistdetail') >= 0 };
+    var isRk = path.indexOf('ranking') >= 0 || params.view === 'ranking';
+    return { path: path, params: params, isPlaylistDetail: path.indexOf('playlistdetail') >= 0, isRanking: isRk };
   }
 
   function extractSongs(payload) {
@@ -595,31 +662,39 @@
     var total = null;
     var lastErr = null;
     var plName = '';
+    var stop = false;
+    var page = 1;
+    var CONC = 2;
 
-    for (var page = 1; page <= 40; page++) {
-      var r;
-      try {
-        r = await apiGet('/playlist/track/all', { id: id, page: page, pagesize: PAGE_SIZE });
-      } catch (e) {
-        lastErr = e;
-        break;
-      }
-      if (r.status !== 1) {
-        lastErr = new Error('status=' + r.status + ' code=' + r.error_code + ' ' + (r.errmsg || ''));
-        break;
-      }
-      var data = r.data || {};
-      if (!plName) {
-        var li = data.list_info || {};
-        plName = pick(li, ['name', 'title', 'playlistName']) || pick(data, ['name', 'title']);
-      }
-      if (total === null && typeof data.count === 'number') total = data.count;
-      var arr = Array.isArray(data.songs) ? data.songs : extractSongs(r);
-      if (!arr.length) break;
-      all = all.concat(arr);
-      if (total !== null && all.length >= total) break;
-      if (!total && arr.length < PAGE_SIZE) break;
-      await sleep(120);
+    while (!stop && page <= 40) {
+      var pages = [];
+      for (var c = 0; c < CONC && page <= 40; c++, page++) pages.push(page);
+      var results = await Promise.all(pages.map(function (p) {
+        return apiGet('/playlist/track/all', { id: id, page: p, pagesize: PAGE_SIZE })
+          .then(function (r) { return { r: r }; })
+          .catch(function (e) { return { err: e }; });
+      }));
+      results.forEach(function (it) {
+        if (stop) return;
+        if (it.err) { lastErr = it.err; stop = true; return; }
+        var r = it.r;
+        if (r.status !== 1) {
+          lastErr = new Error('status=' + r.status + ' code=' + r.error_code + ' ' + (r.errmsg || ''));
+          stop = true; return;
+        }
+        var data = r.data || {};
+        if (!plName) {
+          var li = data.list_info || {};
+          plName = pick(li, ['name', 'title', 'playlistName']) || pick(data, ['name', 'title']);
+        }
+        if (total === null && typeof data.count === 'number') total = data.count;
+        var arr = Array.isArray(data.songs) ? data.songs : extractSongs(r);
+        if (!arr.length) { stop = true; return; }
+        all = all.concat(arr);
+        if (total !== null && all.length >= total) stop = true;
+        else if (!total && arr.length < PAGE_SIZE) stop = true;
+      });
+      await sleep(40);
     }
 
     if (!all.length && lastErr) throw lastErr;
@@ -877,6 +952,35 @@
     panel.innerHTML = html;
     document.body.appendChild(panel);
 
+    // 标题栏拖拽移动面板（关闭按钮除外）。
+    (function makeDraggable(p) {
+      var head = p.querySelector('.odl-head');
+      if (!head) return;
+      head.style.cursor = 'move';
+      head.style.userSelect = 'none';
+      var dragging = false, sx = 0, sy = 0, ox = 0, oy = 0;
+      head.addEventListener('mousedown', function (e) {
+        if (e.target.closest('.odl-close')) return;
+        var rect = p.getBoundingClientRect();
+        p.style.right = 'auto';
+        p.style.left = rect.left + 'px';
+        p.style.top = rect.top + 'px';
+        dragging = true;
+        sx = e.clientX; sy = e.clientY; ox = rect.left; oy = rect.top;
+        e.preventDefault();
+      });
+      document.addEventListener('mousemove', function (e) {
+        if (!dragging) return;
+        var nx = ox + (e.clientX - sx);
+        var ny = oy + (e.clientY - sy);
+        nx = Math.max(0, Math.min(nx, window.innerWidth - 60));
+        ny = Math.max(0, Math.min(ny, window.innerHeight - 40));
+        p.style.left = nx + 'px';
+        p.style.top = ny + 'px';
+      });
+      document.addEventListener('mouseup', function () { dragging = false; });
+    })(panel);
+
     var closeBtn = panel.querySelector('#odl-close');
     function closePanel(e) {
       if (e) { e.preventDefault(); e.stopPropagation(); }
@@ -923,8 +1027,9 @@
     panel.querySelector('#odl-pl-refresh').addEventListener('click', function (e) {
       e.preventDefault(); e.stopPropagation();
       refreshContext();
-      // 识别到当前页歌单就直接拉取，一步到位。
-      if (batch.listid || batch.gcid) pullPlaylist();
+      // 识别到当前页歌单或榜单就直接拉取，一步到位。
+      var rr = detectRoute();
+      if (batch.listid || batch.gcid || rr.isRanking) pullPlaylist();
       else setStatus('当前页不是歌单详情页，或还没识别到歌单', 'err', 'odl-status2');
     });
 
@@ -1052,7 +1157,8 @@
     var el = document.querySelector('h1.title') ||
              document.querySelector('.playlist-title') ||
              document.querySelector('.playlist-name') ||
-             document.querySelector('.detail-title');
+             document.querySelector('.detail-title') ||
+             document.querySelector('.rank-title');
     if (el) {
       var t = (el.textContent || '').replace(/\s+/g, ' ').trim();
       if (t) return t;
@@ -1082,8 +1188,20 @@
         return;
       }
     }
-    // 离开歌单详情页：同样清掉残留曲目。
+    if (r.isRanking) {
+      batch.listid = '';
+      batch.gcid = '';
+      batch.listName = detectPlaylistNameFromDOM() || '当前榜单';
+      if (batch.songs.length && batch.loadedKey && batch.loadedKey !== 'ranking') {
+        resetBatchList();
+      }
+      updateDetect();
+      setStatus('检测到榜单，点「拉取本歌单」加载列表', '', 'odl-status2');
+      return;
+    }
+    // 离开歌单详情页（或当前页不是歌单）：清掉残留曲目与上次歌单名，避免标题张冠李戴。
     if (batch.songs.length) resetBatchList();
+    batch.listName = '';
     updateDetect();
   }
 
@@ -1118,7 +1236,91 @@
     await loadMyPlaylists();
   }
 
+  // ---------- 排行榜适配：DOM 读曲目 → 搜索反查 hash ----------
+
+  function normText(s) {
+    return String(s || '').toLowerCase().replace(/[\s\-_、,，&·:：()（）\[\]【】'"!！?？]/g, '');
+  }
+
+  async function pullRanking() {
+    // 榜单有专门接口：/rank/list 取榜单 id↔名称，/rank/audio?rankid= 分页拉曲目。
+    var listResp;
+    try { listResp = await apiGet('/rank/list', {}); }
+    catch (e) { setStatus('榜单列表获取失败：' + e.message, 'err', 'odl-status2'); return; }
+    var info = (listResp && listResp.data && listResp.data.info) || [];
+    if (!info.length) { setStatus('榜单列表为空', 'err', 'odl-status2'); return; }
+
+    // 只认当前高亮（active）的榜单 chip；读不到 active 再退到展示区块标题。
+    var chipNames = function (sel) {
+      return Array.prototype.map.call(document.querySelectorAll(sel),
+        function (el) { return (el.textContent || '').replace(/\s+/g, ' ').trim(); }
+      ).filter(Boolean);
+    };
+    var domNames = chipNames('.rank-chip.active');
+    if (!domNames.length) domNames = chipNames('.rank-title');
+    var targets = info.filter(function (rank) {
+      var rn = rank.rankname || '';
+      if (!domNames.length) return false;
+      return domNames.some(function (n) {
+        return normText(n) === normText(rn) || n.indexOf(rn) >= 0 || rn.indexOf(n) >= 0;
+      });
+    });
+    if (!targets.length) targets = [info[0]];
+
+    var songs = [], missed = [], seenHash = {};
+    var PAGE = 30, CONC = 2;
+    for (var t = 0; t < targets.length; t++) {
+      var rank = targets[t];
+      var page = 1, stop = false;
+      while (!stop && page <= 40) {
+        var pages = [];
+        for (var c = 0; c < CONC && page <= 40; c++, page++) pages.push(page);
+        setStatus('[' + rank.rankname + '] 第 ' + pages[0] + '–' + pages[pages.length - 1] + ' 页…', '', 'odl-status2');
+        var results = await Promise.all(pages.map(function (p) {
+          return apiGet('/rank/audio', { rankid: rank.rankid, page: p, pagesize: PAGE })
+            .then(function (resp) { return (resp && resp.data && resp.data.songlist) || []; })
+            .catch(function () { return []; });
+        }));
+        results.forEach(function (sl) {
+          if (sl.length < PAGE) stop = true;
+          sl.forEach(function (raw) {
+            var si = songInfo(raw);
+            if (si && si.hash && !seenHash[si.hash]) {
+              seenHash[si.hash] = true;
+              songs.push({ hash: si.hash, name: si.title, author: si.artist, cover: si.img, goods: si.goods || [] });
+            } else if (si) {
+              missed.push(si.title || '未知');
+            }
+          });
+        });
+        await sleep(40);
+      }
+    }
+
+    batch.songs = songs;
+    batch.selected = {};
+    batch.saved = {};
+    batch.shielded = missed.length;
+    batch.songs.forEach(function (s) { batch.selected[s.hash] = true; });
+    batch.loadedKey = 'ranking';
+    renderList();
+    updateCount();
+    setStatus('拉取完成：' + batch.songs.length + ' 首可下载' +
+      (missed.length ? '（' + missed.length + ' 首未匹配到）' : ''),
+      missed.length ? 'err' : 'ok', 'odl-status2');
+    log('榜单拉取', batch.songs.length, '未匹配 ' + missed.length);
+    await markSaved();
+  }
+
   async function pullPlaylist() {
+    var r = detectRoute();
+    if (!batch.listid && !batch.gcid && r.isRanking) {
+      var btnRk = document.getElementById('odl-pl-refresh');
+      if (btnRk) btnRk.disabled = true;
+      try { await pullRanking(); }
+      finally { if (btnRk) btnRk.disabled = false; }
+      return;
+    }
     if (!batch.listid && !batch.gcid) {
       setStatus('先识别或选择一个歌单', 'err', 'odl-status2');
       return;
@@ -1171,6 +1373,9 @@
     batch.saved = {};
     batch.shielded = 0;
     batch.loadedKey = '';
+    batch.listid = '';
+    batch.gcid = '';
+    batch.listName = '';
     renderList();
     updateCount();
   }
@@ -1600,6 +1805,7 @@
 
   function init() {
     loadState();
+    injectBridge();
     buildUI();
     refreshContext();
 
