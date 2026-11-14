@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "离线下载器 (macOS)",
   "plugin_id": "offline-downloader-mac",
-  "version": "1.0.0",
-  "description": "macOS 移植版离线下载器：单曲 + 歌单批量下载到本地，支持标准/高品/无损/Hi-Res 四档音质；本地宿主直接写盘到 ~/Music/MoeKoeMusic，不弹保存框，存完离线可播。基于 gaozil996 原版离线下载器移植。",
+  "version": "1.0.1",
+  "description": "macOS 移植版离线下载器：单曲 + 歌单批量下载到本地，支持标准/高品/无损/Hi-Res 四档音质；本地程序直接写盘到 ~/Music/MoeKoeMusic，不弹保存框，存完离线可播。基于 gaozil996 原版离线下载器移植。",
   "moekoe": true,
   "minversion": "1.7.0",
   "author": {

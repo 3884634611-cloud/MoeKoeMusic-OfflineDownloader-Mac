@@ -29,6 +29,8 @@
     songs: [],
     selected: {},
     saved: {},
+    loadedKey: '',
+    playlistsLoaded: false,
     marking: false,
     shielded: 0,
     running: false,
@@ -592,6 +594,7 @@
     var all = [];
     var total = null;
     var lastErr = null;
+    var plName = '';
 
     for (var page = 1; page <= 40; page++) {
       var r;
@@ -606,6 +609,10 @@
         break;
       }
       var data = r.data || {};
+      if (!plName) {
+        var li = data.list_info || {};
+        plName = pick(li, ['name', 'title', 'playlistName']) || pick(data, ['name', 'title']);
+      }
       if (total === null && typeof data.count === 'number') total = data.count;
       var arr = Array.isArray(data.songs) ? data.songs : extractSongs(r);
       if (!arr.length) break;
@@ -616,7 +623,7 @@
     }
 
     if (!all.length && lastErr) throw lastErr;
-    return all;
+    return { songs: all, name: plName };
   }
 
   async function fetchPlaylistSongs() {
@@ -632,11 +639,12 @@
     var lastErr = null;
     for (var i = 0; i < ids.length; i++) {
       try {
-        var songs = await fetchSongsById(ids[i]);
-        if (songs.length) {
+        var res = await fetchSongsById(ids[i]);
+        if (res.songs.length) {
           batch.gcid = ids[i];
-          log('歌单曲目拉取成功，id=', ids[i], '共', songs.length, '首');
-          return songs;
+          if (res.name) batch.listName = res.name;
+          log('歌单曲目拉取成功，id=', ids[i], '共', res.songs.length, '首');
+          return res.songs;
         }
       } catch (e) {
         lastErr = e;
@@ -791,7 +799,7 @@
       var panel = document.getElementById('odl-panel');
       if (panel) {
         panel.classList.toggle('odl-hidden');
-        if (!panel.classList.contains('odl-hidden')) refreshContext();
+        if (!panel.classList.contains('odl-hidden')) { refreshContext(); ensurePlaylists(); }
       }
     });
 
@@ -820,7 +828,7 @@
 
     var html = '';
     html += '<div class="odl-head"><div class="odl-title">离线下载器<small>单曲 · 歌单批量 · 下完不联网也能播</small></div>' +
-      '<button class="odl-close" id="odl-close">&times;</button></div>';
+      '<button class="odl-close" id="odl-close" title="关闭">&times;</button></div>';
 
     html += '<div class="odl-tabs"><button class="odl-tab" data-mode="single">单曲</button>' +
       '<button class="odl-tab" data-mode="batch">歌单批量</button></div>';
@@ -839,10 +847,8 @@
 
     html += '<div id="odl-view-batch" class="odl-hidden">';
     html += '<div class="odl-pl-detect" id="odl-pl-detect">打开任意歌单详情页可自动识别</div>';
-    html += '<div class="odl-row"><button class="odl-mini" id="odl-pl-refresh">识别当前页</button>' +
-      '<button class="odl-mini" id="odl-pl-mine">我的歌单</button>' +
-      '<select class="odl-select" id="odl-pl-select"><option value="">— 选择歌单 —</option></select></div>';
-    html += '<div class="odl-row"><button class="odl-mini" id="odl-pl-fetch">拉取歌曲</button>' +
+    html += '<div class="odl-row"><button class="odl-mini" id="odl-pl-refresh">拉取本歌单</button>' +
+      '<select class="odl-select" id="odl-pl-select"><option value="">— 选择歌单 —</option></select>' +
       '<button class="odl-mini" id="odl-sel-all">全选</button>' +
       '<button class="odl-mini" id="odl-sel-none">清空</button>' +
       '<span class="odl-count" id="odl-count">0 首</span></div>';
@@ -871,10 +877,15 @@
     panel.innerHTML = html;
     document.body.appendChild(panel);
 
-    panel.querySelector('#odl-close').addEventListener('click', function (e) {
-      e.preventDefault(); e.stopPropagation();
+    var closeBtn = panel.querySelector('#odl-close');
+    function closePanel(e) {
+      if (e) { e.preventDefault(); e.stopPropagation(); }
       panel.classList.add('odl-hidden');
-    });
+    }
+    // 歌单批量页宿主在冒泡链上会吞掉 click，冒泡监听收不到；
+    // 用捕获阶段的 mousedown 先关面板，click 再补一道兜底。
+    closeBtn.addEventListener('mousedown', closePanel, true);
+    closeBtn.addEventListener('click', closePanel, true);
 
     panel.querySelectorAll('.odl-tab').forEach(function (b) {
       b.addEventListener('click', function (e) {
@@ -912,24 +923,22 @@
     panel.querySelector('#odl-pl-refresh').addEventListener('click', function (e) {
       e.preventDefault(); e.stopPropagation();
       refreshContext();
-    });
-
-    panel.querySelector('#odl-pl-mine').addEventListener('click', async function (e) {
-      e.preventDefault(); e.stopPropagation();
-      await loadMyPlaylists();
+      // 识别到当前页歌单就直接拉取，一步到位。
+      if (batch.listid || batch.gcid) pullPlaylist();
+      else setStatus('当前页不是歌单详情页，或还没识别到歌单', 'err', 'odl-status2');
     });
 
     panel.querySelector('#odl-pl-select').addEventListener('change', function (e) {
       var opt = e.target.selectedOptions[0];
       if (!opt || !opt.value) return;
+      var newGid = opt.getAttribute('data-gcid') || '';
       batch.listid = opt.value;
-      batch.gcid = opt.getAttribute('data-gcid') || '';
+      batch.gcid = newGid;
       batch.listName = opt.textContent;
+      // 手动切换到另一个歌单：清掉上一个歌单残留的曲目。
+      var curKey = String(newGid || opt.value);
+      if (batch.songs.length && batch.loadedKey && batch.loadedKey !== curKey) resetBatchList();
       updateDetect();
-    });
-
-    panel.querySelector('#odl-pl-fetch').addEventListener('click', function (e) {
-      e.preventDefault(); e.stopPropagation();
       pullPlaylist();
     });
 
@@ -1016,14 +1025,11 @@
     var el = document.getElementById('odl-pl-detect');
     if (!el) return;
     if (batch.listid || batch.gcid) {
-      var idTxt = [];
-      if (batch.listid) idTxt.push('listid=' + escapeHtml(String(batch.listid)));
-      if (batch.gcid) idTxt.push('gcid=' + escapeHtml(String(batch.gcid)));
-      el.innerHTML = '当前歌单：<b>' + escapeHtml(batch.listName || batch.listid || batch.gcid) + '</b>' +
-        '<span class="odl-id">' + idTxt.join(' · ') + '</span>';
+      log('当前歌单 id: listid=', batch.listid, 'gcid=', batch.gcid);
+      el.innerHTML = '当前歌单：<b>' + escapeHtml(batch.listName || batch.listid || batch.gcid) + '</b>';
       el.classList.add('odl-detected');
     } else {
-      el.textContent = '打开任意歌单详情页可自动识别，或点「我的歌单」选择';
+      el.textContent = '打开歌单详情页自动识别，或在下拉框选择歌单';
       el.classList.remove('odl-detected');
     }
     var sel = document.getElementById('odl-pl-select');
@@ -1042,6 +1048,18 @@
     });
   }
 
+  function detectPlaylistNameFromDOM() {
+    var el = document.querySelector('h1.title') ||
+             document.querySelector('.playlist-title') ||
+             document.querySelector('.playlist-name') ||
+             document.querySelector('.detail-title');
+    if (el) {
+      var t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+      if (t) return t;
+    }
+    return '';
+  }
+
   function refreshContext() {
     renderSong();
     var r = detectRoute();
@@ -1050,14 +1068,22 @@
       var gid = r.params.global_collection_id || r.params.list_create_gid || '';
       if (!gid && lid) gid = batch.playlistMap[String(lid)] || '';
       if (lid || gid) {
+        var curKey = String(gid || lid);
         batch.listid = String(lid || '');
         batch.gcid = String(gid || '');
-        if (!batch.listName) batch.listName = '当前打开的歌单';
+        // 识别当前页歌单：优先取页面标题，取不到再用占位名；清掉上次下拉选择残留的旧名。
+        batch.listName = detectPlaylistNameFromDOM() || '当前打开的歌单';
+        // 已加载的是另一个歌单：清掉残留，避免列表张冠李戴。
+        if (batch.songs.length && batch.loadedKey && batch.loadedKey !== curKey) {
+          resetBatchList();
+        }
         updateDetect();
-        setStatus('检测到歌单，点「拉取歌曲」加载列表', '', 'odl-status2');
+        setStatus('检测到歌单，点「拉取本歌单」加载列表', '', 'odl-status2');
         return;
       }
     }
+    // 离开歌单详情页：同样清掉残留曲目。
+    if (batch.songs.length) resetBatchList();
     updateDetect();
   }
 
@@ -1078,6 +1104,7 @@
         sel.appendChild(o);
       });
       if (keep) sel.value = keep;
+      batch.playlistsLoaded = true;
       setStatus('共 ' + list.length + ' 个歌单', 'ok', 'odl-status2');
     } catch (e) {
       warn(e.message);
@@ -1085,13 +1112,19 @@
     }
   }
 
+  // 面板打开时自动加载一次我的歌单，下拉直接可选；失败不置标记，下次再试。
+  async function ensurePlaylists() {
+    if (batch.playlistsLoaded) return;
+    await loadMyPlaylists();
+  }
+
   async function pullPlaylist() {
     if (!batch.listid && !batch.gcid) {
       setStatus('先识别或选择一个歌单', 'err', 'odl-status2');
       return;
     }
-    var btn = document.getElementById('odl-pl-fetch');
-    if (btn) btn.disabled = true;
+    var btnR = document.getElementById('odl-pl-refresh');
+    if (btnR) btnR.disabled = true;
     setStatus('拉取歌单歌曲…', '', 'odl-status2');
     try {
       var songs = await fetchPlaylistSongs();
@@ -1113,6 +1146,7 @@
       batch.saved = {};
       batch.shielded = shielded.length;
       batch.songs.forEach(function (s) { batch.selected[s.hash] = true; });
+      batch.loadedKey = batch.gcid || batch.listid;
       renderList();
       updateCount();
       setStatus('拉取完成：' + batch.songs.length + ' 首可下载' +
@@ -1126,8 +1160,19 @@
       warn('拉取失败', e.message);
       setStatus('拉取失败：' + e.message, 'err', 'odl-status2');
     } finally {
-      if (btn) btn.disabled = false;
+      if (btnR) btnR.disabled = false;
     }
+  }
+
+  // 清空上一个歌单残留的曲目与勾选，切到新歌单后列表回到待拉取状态。
+  function resetBatchList() {
+    batch.songs = [];
+    batch.selected = {};
+    batch.saved = {};
+    batch.shielded = 0;
+    batch.loadedKey = '';
+    renderList();
+    updateCount();
   }
 
   function renderList() {
@@ -1462,7 +1507,7 @@
 
       var songs = [];
       for (var i = 0; i < ids.length && !songs.length; i++) {
-        try { songs = await fetchSongsById(ids[i]); } catch (e) { songs = []; }
+        try { var res = await fetchSongsById(ids[i]); songs = res.songs; } catch (e) { songs = []; }
       }
       if (!songs.length) { plMarksListId = sig; return; }
 
@@ -1548,6 +1593,7 @@
       var panel = document.getElementById('odl-panel');
       if (panel) panel.classList.remove('odl-hidden');
       refreshContext();
+      ensurePlaylists();
       pullPlaylist();
     });
   }
