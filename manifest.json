@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "离线下载器 (macOS)",
+  "name": "离线下载器（macOS / Windows）",
   "plugin_id": "offline-downloader-mac",
   "version": "1.2.0",
-  "description": "离线下载器：单曲 + 歌单 / 榜单批量下载到本地，支持标准 / 高品 / 无损 / Hi-Res 四档音质；本地程序直接写盘到～/Music/MoeKoeMusic，不弹保存框，存完离线可播。支持导出歌词字幕（.srt，剪映 / PR / 达芬奇可直接导入），歌单可只提歌词不下载音频。基于开源离线下载器移植改进。兼容 Windows",
+  "description": "离线下载器：单曲 + 歌单 / 榜单批量下载到本地，支持标准 / 高品 / 无损 / Hi-Res 四档音质；本地程序直接写盘到～/Music/MoeKoeMusic，不弹保存框，存完离线可播。支持导出歌词字幕（.srt，剪映 / PR / 达芬奇可直接导入），歌单可只提歌词不下载音频。",
   "moekoe": true,
   "minversion": "1.7.0",
   "author": {
