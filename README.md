@@ -25,12 +25,12 @@
 1. 完全退出 MoeKoe Music（Dock 右键 → 退出，不是关窗口）。
 2. 把本仓库内容放到插件目录：
    ```
-   ~/Library/Application Support/moekoemusic/extensions/offline-downloader-mac/
+   ~/Library/Application Support/moekoeusic/extensions/offline-downloader-mac/
    ```
    （`extensions` 目录不存在就新建；文件夹名可改，关键是 `manifest.json` 在文件夹内。）
 3. 给本地宿主赋权、清除隔离属性：
    ```bash
-   EXT=~/Library/Application\ Support/moekoemusic/extensions/offline-downloader-mac
+   EXT=~/Library/Application\ Support/moekoeusic/extensions/offline-downloader-mac
    chmod +x "$EXT/host/offline-dl-saver"
    xattr -cr "$EXT"
    ```
@@ -88,6 +88,21 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o moekoe-saver.exe main.go
 
 ## 更新日志
 
+### 1.2.0
+
+**新增**
+- **歌词导出**：单曲面板「提取歌词」一键导出 `.srt`，存到下载目录，同名对应音频；
+- **下载时顺带导出歌词**：单曲页 / 歌单批量页各一个开关，两页互相同步；
+- **歌单批量「只提歌词」**：勾选歌单后一键只导出字幕，不下载音频，几十首歌词一分钟内跑完；
+- 歌词解析与客户端 `LyricsHandler` 同一套调用链（`/search/lyric` → `/lyric`，krc 解码），多音轨歌词取首候选。
+
+**说明**
+- 输出格式为 `.srt`（SubRip），时间码 `HH:MM:SS,mmm`；剪映「文本 → 本地字幕」、DaVinci「Import Subtitle」、Premiere 字幕轨均可直接导入；
+- 只导出原文，不合并翻译行 —— LRC/SRT 一条字幕对应一行文字，同时间戳两行会在剪映里叠印；
+- 纯音乐等无歌词曲目会被跳过，不计入下载失败。
+
+**兼容**：macOS arm64 / x64、Windows x64；MoeKoe Music 客户端 ≥ 1.7.0。
+
 ### 1.1.0
 
 **新增**
@@ -107,6 +122,26 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o moekoe-saver.exe main.go
 - 文件名剥离已自带的「歌手 - 」前缀，避免落盘文件名里歌手重复两次。
 
 **兼容**：macOS arm64 / x64、Windows x64；MoeKoe Music 客户端 ≥ 1.7.0。
+
+## 分享给朋友（一键安装）
+
+把打包好的压缩包发给对方，解压后在终端执行：
+
+```bash
+bash ~/Downloads/<解压目录>/install.sh
+```
+
+脚本会自动按芯片（arm64 / Intel）选对二进制、赋可执行权限、清隔离属性，然后提示重启客户端授权。
+
+或者直接使用托管链接，一条命令完成：
+
+```bash
+curl -sL -A "Mozilla/5.0" -o /tmp/odl.zip <你的分发地址> \
+  && rm -rf /tmp/odl && mkdir -p /tmp/odl && unzip -q /tmp/odl.zip -d /tmp/odl \
+  && bash /tmp/odl/offline-downloader-mac-*/install.sh
+```
+
+对方首次使用时需要：① 在客户端登录过账号、能正常播放；② 在插件管理页给本地程序 `offline-dl-saver` 授权。
 
 ## 已知限制
 

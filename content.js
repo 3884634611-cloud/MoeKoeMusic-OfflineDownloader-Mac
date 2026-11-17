@@ -916,7 +916,10 @@
     for (var i = 0; i < QUALITIES.length; i++) {
       html += '<button class="odl-q" data-q="' + QUALITIES[i].id + '">' + QUALITIES[i].label + '</button>';
     }
-    html += '</div><div class="odl-actions"><button class="odl-go" id="odl-go">下载这首</button></div>';
+    html += '</div><div class="odl-actions"><button class="odl-go" id="odl-go">下载这首</button>' +
+      '<button class="odl-lyric" id="odl-lyric" title="导出 .srt">提取歌词</button></div>';
+    html += '<div class="odl-row"><label class="odl-check"><input type="checkbox" id="odl-auto-lyric">' +
+      '下载时顺带导出歌词（.srt）</label></div>';
     html += '<div class="odl-status" id="odl-status">就绪</div>';
     html += '</div>';
 
@@ -929,6 +932,8 @@
       '<span class="odl-count" id="odl-count">0 首</span></div>';
     html += '<div class="odl-row"><label class="odl-check"><input type="checkbox" id="odl-skip" checked>' +
       '跳过目录里已有的同名文件（取消勾选＝重新下载，可用来换音质）</label></div>';
+    html += '<div class="odl-row"><label class="odl-check"><input type="checkbox" id="odl-auto-lyric-b">' +
+      '下载时顺带导出歌词（.srt）</label></div>';
     html += '<div class="odl-list" id="odl-list"><div class="odl-empty">尚未拉取歌曲</div></div>';
     html += '<div class="odl-label">音质</div><div class="odl-qualities">';
     for (var q = 0; q < QUALITIES.length; q++) {
@@ -936,6 +941,7 @@
     }
     html += '</div>';
     html += '<div class="odl-actions"><button class="odl-go" id="odl-go-batch">下载选中</button>' +
+      '<button class="odl-lyric" id="odl-lyric-batch" title="只导出 .srt，不下载音频">只提歌词</button>' +
       '<button class="odl-stop odl-hidden" id="odl-stop">停止</button></div>';
     html += '<div class="odl-progress odl-hidden" id="odl-progress"><div class="odl-bar"><div class="odl-bar-in" id="odl-bar-in"></div></div>' +
       '<div class="odl-progress-txt" id="odl-progress-txt">0 / 0</div></div>';
@@ -991,6 +997,15 @@
     closeBtn.addEventListener('mousedown', closePanel, true);
     closeBtn.addEventListener('click', closePanel, true);
 
+    // 单曲 / 歌单批量两个页签的「导出歌词」开关保持同步，避免一处勾了另一处不知道。
+    (function bindLyricToggle() {
+      var a = panel.querySelector('#odl-auto-lyric');
+      var b = panel.querySelector('#odl-auto-lyric-b');
+      if (!a || !b) return;
+      a.addEventListener('change', function () { b.checked = a.checked; });
+      b.addEventListener('change', function () { a.checked = b.checked; });
+    })();
+
     panel.querySelectorAll('.odl-tab').forEach(function (b) {
       b.addEventListener('click', function (e) {
         e.preventDefault(); e.stopPropagation();
@@ -1022,6 +1037,11 @@
     panel.querySelector('#odl-go').addEventListener('click', function (e) {
       e.preventDefault(); e.stopPropagation();
       runSingleDownload();
+    });
+
+    panel.querySelector('#odl-lyric').addEventListener('click', function (e) {
+      e.preventDefault(); e.stopPropagation();
+      runLyricExport('odl-status');
     });
 
     panel.querySelector('#odl-pl-refresh').addEventListener('click', function (e) {
@@ -1064,6 +1084,11 @@
     panel.querySelector('#odl-go-batch').addEventListener('click', function (e) {
       e.preventDefault(); e.stopPropagation();
       runBatchDownload(null, !!skipToggle());
+    });
+
+    panel.querySelector('#odl-lyric-batch').addEventListener('click', function (e) {
+      e.preventDefault(); e.stopPropagation();
+      runBatchLyric();
     });
 
     panel.querySelector('#odl-retry').addEventListener('click', function (e) {
@@ -1469,7 +1494,7 @@
     var pct = batch.total ? Math.round(batch.done / batch.total * 100) : 0;
     bar.style.width = pct + '%';
     txt.textContent = batch.done + ' / ' + batch.total +
-      ' · ' + (batch.bytes / 1048576).toFixed(1) + ' MB' +
+      (batch.lyricMode ? ' 首歌词' : ' · ' + (batch.bytes / 1048576).toFixed(1) + ' MB') +
       (batch.skipped ? ' · 跳过 ' + batch.skipped : '') +
       (batch.fails.length ? ' · 失败 ' + batch.fails.length : '');
   }
@@ -1485,6 +1510,192 @@
     el.innerHTML = batch.fails.slice(-6).map(function (f) {
       return '<div class="odl-fail">' + escapeHtml(f) + '</div>';
     }).join('');
+  }
+
+  // ---------- 歌词导出 ----------
+  // 调用链与主程序 LyricsHandler 一致：
+  //   /search/lyric?hash=hash        → 候选 [{id, accesskey}]
+  //   /lyric?id=&accesskey=&fmt=krc&decode=true → decodeContent（krc 明文）
+  // krc 行格式：[start,dur]<逐字标签>词；翻译/音译塞在 [language:<base64 JSON>] 行。
+
+  function fmtLrcTime(ms) {
+    ms = Math.max(0, Math.round(ms));
+    var m = Math.floor(ms / 60000);
+    var s = Math.floor((ms % 60000) / 1000);
+    var cs = Math.floor((ms % 1000) / 10);
+    return (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s + '.' + (cs < 10 ? '0' : '') + cs;
+  }
+
+  function b64ToUtf8(b64) {
+    var bin = atob(b64);
+    var bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new TextDecoder('utf-8').decode(bytes);
+  }
+
+  function decodeLanguageMeta(krc) {
+    var out = { translation: [], roman: [] };
+    var rows = String(krc).split(/\r?\n/);
+    var line = null;
+    for (var i = 0; i < rows.length; i++) {
+      if (/^\[language:/.test(rows[i])) { line = rows[i]; break; }
+    }
+    if (!line) return out;
+    try {
+      var b64 = line.replace(/^\[language:/, '').replace(/\]$/, '').replace(/[^A-Za-z0-9+/=]/g, '');
+      var pad = (4 - (b64.length % 4)) % 4;
+      if (pad) b64 += new Array(pad + 1).join('=');
+      var data = JSON.parse(b64ToUtf8(b64));
+      var sections = (data && data.content) || [];
+      for (var k = 0; k < sections.length; k++) {
+        var sec = sections[k] || {};
+        var arr = (sec.lyricContent || []).map(function (r) {
+          return Array.isArray(r) ? r.join('') : String(r == null ? '' : r);
+        });
+        // type 1 = 翻译，type 0 = 音译
+        if (sec.type === 1) out.translation = arr;
+        else if (sec.type === 0) out.roman = arr;
+      }
+    } catch (e) { warn('翻译歌词解析失败', e && e.message); }
+    return out;
+  }
+
+  function krcToLrc(krc, withTranslation, withTimestamp) {
+    var meta = decodeLanguageMeta(krc);
+    var rows = String(krc).split(/\r?\n/);
+    var lines = [];
+    var idx = 0;
+    for (var i = 0; i < rows.length; i++) {
+      var m = rows[i].match(/^\[(\d+),(\d+)\](.*)/);
+      if (!m) continue;
+      var start = parseInt(m[1], 10);
+      var body = m[3].replace(/<[^<>]*>/g, '').trim();
+      if (!body) continue;
+      lines.push((withTimestamp ? '[' + fmtLrcTime(start) + ']' : '') + body);
+      if (withTranslation && meta.translation[idx]) {
+        var tr = String(meta.translation[idx]).trim();
+        // 同行拼接：剪映里一条字幕就是一行文字，另起一行会叠印
+        if (tr) lines[lines.length - 1] = lines[lines.length - 1] + ' / ' + tr;
+      }
+      idx++;
+    }
+    return lines.join('\n');
+  }
+
+  var lyricBusy = false;
+
+  function pad2(n) { return (n < 10 ? '0' : '') + n; }
+
+  // LRC → SRT：剪映 / PR / 达芬奇都认 SRT，插件直接出这个格式。
+  function lrcToSrt(lrcText) {
+    var items = [];
+    var rows = String(lrcText).split('\n');
+
+    for (var i = 0; i < rows.length; i++) {
+      var m = rows[i].match(/^\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]\s*(.*)$/);
+      if (!m) continue;
+      var ms = (parseInt(m[1], 10) * 60 + parseInt(m[2], 10)) * 1000;
+      var frac = m[3];
+      if (frac) {
+        var n = frac.length;
+        ms += n === 1 ? parseInt(frac, 10) * 100
+            : n === 2 ? parseInt(frac, 10) * 10
+            : parseInt(frac.slice(0, 3), 10);
+      }
+      var text = m[4].trim();
+      if (!text) continue;
+      items.push({ ms: ms, text: text });
+    }
+
+    function srtTime(v) {
+      if (v < 0) v = 0;
+      var h = Math.floor(v / 3600000);
+      var mm = Math.floor((v % 3600000) / 60000);
+      var ss = Math.floor((v % 60000) / 1000);
+      var ff = v % 1000;
+      return pad2(h) + ':' + pad2(mm) + ':' + pad2(ss) + ',' + ('00' + ff).slice(-3);
+    }
+
+    var out = [];
+    for (var k = 0; k < items.length; k++) {
+      var cur = items[k];
+      var end = (k + 1 < items.length) ? items[k + 1].ms : cur.ms + 3000;
+      if (end - cur.ms < 600) end = cur.ms + 600;
+      out.push(String(k + 1));
+      out.push(srtTime(cur.ms) + ' --> ' + srtTime(end));
+      out.push(cur.text);
+      out.push('');
+    }
+    return out.join('\n');
+  }
+
+  function lyricTarget(s) {
+    return {
+      hash: s && s.hash,
+      title: (s && (s.title || s.name)) || '未知歌曲',
+      artist: (s && (s.artist || s.author)) || '未知歌手'
+    };
+  }
+
+  function autoLyric() {
+    var a = document.getElementById('odl-auto-lyric');
+    var b = document.getElementById('odl-auto-lyric-b');
+    return !!((a && a.checked) || (b && b.checked));
+  }
+
+  async function fetchLyricLrc(s, withTimestamp) {
+    var search = await apiGet('/search/lyric', { hash: s.hash });
+    var cands = (search && search.candidates) ||
+                (search && search.data && search.data.candidates) || [];
+    if (!cands.length) throw new Error('这首歌没有歌词');
+    var c0 = cands[0] || {};
+    var res = await apiGet('/lyric', {
+      id: c0.id,
+      accesskey: c0.accesskey,
+      fmt: 'krc',
+      decode: 'true'
+    });
+    var content = res && res.decodeContent;
+    if (!content) throw new Error('歌词内容为空');
+    var lrc = krcToLrc(content, false, withTimestamp !== false);
+    if (!lrc) throw new Error('歌词解析后为空');
+    return lrc;
+  }
+
+  /**
+   * 导出当前（或指定）歌曲的歌词到下载目录。
+   * statusId 指定提示写哪个状态栏；quiet=true 时不刷状态（批量下载用）。
+   */
+  async function runLyricExport(statusId, song, quiet) {
+    var st = statusId || 'odl-status';
+    if (lyricBusy) return false;
+    var s = lyricTarget(song || songInfo(getCurrentSong()));
+    if (!s.hash) { if (!quiet) setStatus('当前歌缺少 hash，取不到歌词', 'err', st); return false; }
+
+    lyricBusy = true;
+    var btn = document.getElementById('odl-lyric');
+    if (btn) btn.disabled = true;
+    if (!quiet) setStatus('正在拉取歌词…', '', st);
+    try {
+      var lrc = await fetchLyricLrc(s, true);
+      var base = sanitize(s.artist + ' - ' + s.title);
+      var srt = lrcToSrt(lrc);
+
+      // 只出 .srt：剪映 / PR / 达芬奇 三个都直接认，不需要再转格式。
+      var r1 = await nhCall('save', { dir: saveDir(), dest: base + '.srt', text: srt }, 15000);
+      if (!r1 || !r1.ok) throw new Error((r1 && r1.msg) || '本地程序写入失败');
+
+      log('歌词导出', r1.path, r1.bytes);
+      if (!quiet) setStatus('歌词已导出：' + base + '.srt', 'ok', st);
+      return true;
+    } catch (e) {
+      warn('歌词导出失败', e && e.message);
+      if (!quiet) setStatus('歌词导出失败：' + (e && e.message), 'err', st);
+      return false;
+    } finally {
+      lyricBusy = false;
+      if (btn) btn.disabled = false;
+    }
   }
 
   async function runSingleDownload() {
@@ -1514,12 +1725,81 @@
       } catch (e2) {}
       setStatus('完成：' + res.path + '（' + (res.bytes / 1048576).toFixed(2) + ' MB · ' + r.quality + '）', 'ok');
       log('单曲下载完成', res.path, res.bytes);
+      // 下载完成后再导歌词：音乐已落盘，歌词失败也不影响这首歌的可用性。
+      if (autoLyric() && (await runLyricExport('odl-status', s))) {
+        setStatus('完成：' + res.path + '\n歌词：' + sanitize(s.artist + ' - ' + s.title) + '.srt', 'ok');
+      }
     } catch (e) {
       warn('单曲下载失败', e.message);
       setStatus('失败：' + e.message, 'err');
     } finally {
       if (btn) btn.disabled = false;
     }
+  }
+
+  // 只提歌词：不碰音频，逐首走 /search/lyric → /lyric 写 .srt。
+  // 剪辑场景只要字幕，下载几十首 flac 纯属占盘。
+  async function runBatchLyric() {
+    if (batch.running) return;
+    var list = selectedSongs();
+    if (!list.length) {
+      setStatus('先拉取歌曲并勾选要导歌词的', 'err', 'odl-status2');
+      return;
+    }
+
+    batch.running = true;
+    batch.stopFlag = false;
+    batch.total = list.length;
+    batch.done = 0;
+    batch.bytes = 0;
+    batch.skipped = 0;
+    batch.fails = [];
+    batch.failHashes = [];
+    batch.blockedCount = 0;
+    batch.lyricMode = true;
+    var okCount = 0;
+
+    var goBtn = document.getElementById('odl-go-batch');
+    var lyBtn = document.getElementById('odl-lyric-batch');
+    var stopBtn = document.getElementById('odl-stop');
+    if (goBtn) goBtn.disabled = true;
+    if (lyBtn) { lyBtn.disabled = true; lyBtn.textContent = '提取中…'; }
+    if (stopBtn) stopBtn.classList.remove('odl-hidden');
+    updateProgress();
+    renderFails();
+    setStatus('开始提取歌词（不下载音频）', '', 'odl-status2');
+
+    for (var i = 0; i < list.length; i++) {
+      if (batch.stopFlag) {
+        setStatus('已停止，完成 ' + batch.done + ' / ' + batch.total, 'err', 'odl-status2');
+        break;
+      }
+      var s = list[i];
+      setStatus('[' + (i + 1) + '/' + list.length + '] ' + s.author + ' - ' + s.name, '', 'odl-status2');
+      try {
+        var okLy = await runLyricExport('odl-status2', s, true);
+        if (okLy) okCount++;
+        else {
+          batch.fails.push(s.name + ' - 提取失败（可能没有歌词）');
+          renderFails();
+        }
+      } catch (lyErr) {
+        batch.fails.push(s.name + ' - ' + lyErr.message);
+        renderFails();
+      }
+      batch.done++;
+      updateProgress();
+      await sleep(350);
+    }
+
+    batch.running = false;
+    if (goBtn) goBtn.disabled = false;
+    if (lyBtn) { lyBtn.disabled = false; lyBtn.textContent = '只提歌词'; }
+    if (stopBtn) stopBtn.classList.add('odl-hidden');
+
+    setStatus('歌词提取完成：' + okCount + ' 首' +
+      (batch.fails.length ? ' · 失败 ' + batch.fails.length : '') + '（只写了 .srt）',
+      batch.fails.length ? 'err' : 'ok', 'odl-status2');
   }
 
   async function runBatchDownload(onlyHashes, skipExisting) {
@@ -1541,6 +1821,7 @@
     batch.fails = [];
     batch.failHashes = [];
     batch.blockedCount = 0;
+    batch.lyricMode = false;
 
     var goBtn = document.getElementById('odl-go-batch');
     var stopBtn = document.getElementById('odl-stop');
@@ -1584,6 +1865,12 @@
           }
         } catch (e2) {}
         log('批量完成', res.path, res.bytes);
+        // 批量模式下歌词静默导出，不打断「第几首 / 总进度」的状态提示。
+        // 单独 try：纯音乐没歌词不该把这首算成下载失败。
+        if (autoLyric()) {
+          try { await runLyricExport('odl-status2', s, true); }
+          catch (lyErr) { warn('歌词跳过', s.name, lyErr.message); }
+        }
       } catch (e) {
         batch.fails.push(s.name + ' - ' + e.message);
         // A track the server refuses to serve will refuse again. Keep it out

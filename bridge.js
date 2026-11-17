@@ -202,6 +202,13 @@
       return true;
     }
 
+    if (req.action === 'save') {
+      // 文本落盘（歌词导出）。同样复用 request 的长回包通道。
+      var sq = req.payload || {};
+      request(sq, 'save', null, 15000).then(sendResponse);
+      return true;
+    }
+
     return false;
   });
 

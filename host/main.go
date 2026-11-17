@@ -462,6 +462,75 @@ func cmdCheck(body map[string]any) {
 	send(map[string]any{"id": id, "ok": true, "have": have})
 }
 
+// ---------- 文本落盘（歌词导出用） ----------
+//
+// 与 cmdDownload 共用同一套目录越界保护：目标必须落在下载目录内。
+// text 由客户端以 UTF-8 纯文本传入，原样落盘，不做编码转换。
+func cmdSaveText(body map[string]any) {
+	id := body["id"]
+	dest := strOf(body["dest"])
+	text := strOf(body["text"])
+	dir := expandHome(strOf(body["dir"]))
+
+	if dest == "" {
+		reply(id, false, "dest 不能为空", "", 0)
+		return
+	}
+	if text == "" {
+		reply(id, false, "内容为空", "", 0)
+		return
+	}
+	dest = cleanName(dest)
+
+	if dir != "" {
+		_ = os.MkdirAll(dir, 0o755)
+	}
+
+	full := dest
+	if !filepath.IsAbs(dest) {
+		full = filepath.Join(dir, dest)
+	}
+
+	// 越界兜底：目标必须落在下载目录内。
+	if dir != "" {
+		guardRoot, err1 := filepath.Abs(dir)
+		target, err2 := filepath.Abs(full)
+		if err1 != nil || err2 != nil {
+			reply(id, false, "路径无效", "", 0)
+			return
+		}
+		prefix := guardRoot
+		if !strings.HasSuffix(prefix, string(filepath.Separator)) {
+			prefix += string(filepath.Separator)
+		}
+		if !strings.HasPrefix(target, prefix) {
+			reply(id, false, "目标路径越出了下载目录，已拒绝", "", 0)
+			return
+		}
+		full = target
+	}
+
+	if parent := filepath.Dir(full); parent != "" {
+		_ = os.MkdirAll(parent, 0o755)
+	}
+
+	// 先写 .part 再改名，避免写到一半留下的半截歌词被当成完整文件。
+	part := full + ".part"
+	_ = os.Remove(part)
+	if err := os.WriteFile(part, []byte(text), 0o644); err != nil {
+		reply(id, false, "写入失败: "+err.Error(), "", 0)
+		return
+	}
+	_ = os.Remove(full)
+	if err := os.Rename(part, full); err != nil {
+		reply(id, false, "落盘失败: "+err.Error(), "", 0)
+		return
+	}
+
+	n := int64(len([]byte(text)))
+	reply(id, true, "ok", full, n)
+}
+
 // ---------- 工具 ----------
 
 // expandHome 把 ~ / ~/path 展开成用户主目录下的绝对路径（Mac/Linux）。
@@ -548,6 +617,8 @@ func main() {
 			cmdExists(body)
 		case "check":
 			cmdCheck(body)
+		case "save":
+			cmdSaveText(body)
 		default:
 			reply(id, false, "未知命令: "+cmd, "", 0)
 		}
