@@ -623,3 +623,23 @@ html.dark .odl-toggle {
 .odl-check:hover {
   color: #4a4a4a;
 }
+
+/* === ODL_SAVE_DIR_PATCH: 保存目录行布局修正（避免路径被挤成一字一行） === */
+.odl-savedir {
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.odl-savedir .odl-dir-text {
+  flex: 1 1 auto;
+  min-width: 120px;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  word-break: normal;
+}
+
+.odl-dir-box {
+  flex: 1 1 100%;
+}

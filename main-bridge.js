@@ -15,6 +15,26 @@
       window.postMessage({ __odl: 'bridge-res', id: msg.id, payload: payload }, '*');
     };
 
+    // === ODL_SAVE_DIR_PATCH: 系统文件夹选择框 ===
+    // preload 在主世界挂了 electronAPI.showOpenDialog，隔离世界的 content.js
+    // 通过本桥请求它，从而弹出原生「打开文件夹」面板（可选外接盘 / U 盘）。
+    if (msg.path === '__odl_show_open_dialog') {
+      if (!window.electronAPI || typeof window.electronAPI.showOpenDialog !== 'function') {
+        reply({ __err: '当前客户端未暴露 electronAPI.showOpenDialog' });
+        return;
+      }
+      var opts = msg.payload || {};
+      Promise.resolve()
+        .then(function () {
+          return window.electronAPI.showOpenDialog({
+            properties: opts.properties || ['openDirectory', 'createDirectory']
+          });
+        })
+        .then(function (res) { reply({ res: res }); })
+        .catch(function (e) { reply({ __err: String((e && e.message) || e) }); });
+      return;
+    }
+
     if (!window.kugouapi || typeof window.kugouapi.request !== 'function') {
       reply({ __err: '当前客户端未注入 kugouapi，请升级 MoeKoeMusic 到支持内置 API 的版本' });
       return;

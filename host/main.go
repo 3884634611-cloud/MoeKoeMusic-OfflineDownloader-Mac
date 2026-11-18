@@ -270,7 +270,16 @@ func cmdDownload(body map[string]any) {
 	dest = cleanName(dest)
 
 	if dir != "" {
-		_ = os.MkdirAll(dir, 0o755)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			// 目标盘不存在 / 不可写时回退（典型场景：只有 C 分区的机器上
+			// Windows 默认目录 D:\MoeKoeMusic 建不出来）。
+			if h, e := os.UserHomeDir(); e == nil {
+				fallback := filepath.Join(h, "Music", "MoeKoeMusic")
+				if os.MkdirAll(fallback, 0o755) == nil {
+					dir = fallback
+				}
+			}
+		}
 	}
 
 	full := dest
@@ -483,7 +492,16 @@ func cmdSaveText(body map[string]any) {
 	dest = cleanName(dest)
 
 	if dir != "" {
-		_ = os.MkdirAll(dir, 0o755)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			// 目标盘不存在 / 不可写时回退（典型场景：只有 C 分区的机器上
+			// Windows 默认目录 D:\MoeKoeMusic 建不出来）。
+			if h, e := os.UserHomeDir(); e == nil {
+				fallback := filepath.Join(h, "Music", "MoeKoeMusic")
+				if os.MkdirAll(fallback, 0o755) == nil {
+					dir = fallback
+				}
+			}
+		}
 	}
 
 	full := dest

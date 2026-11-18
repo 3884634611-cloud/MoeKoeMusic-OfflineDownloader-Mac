@@ -371,8 +371,13 @@
     return null;
   }
 
-  // Mac/Linux 默认落用户音乐目录（~ 由本地宿主程序展开）；Windows 端用原版 exe。
-  var SAVE_DIR = '~/Music/MoeKoeMusic';
+  // 默认保存目录：按平台给。
+  // macOS / Linux 走 ~ 展开（宿主 expandHome 一定认 ~/）；
+  // Windows 给绝对盘符路径，跟原版 Windows 插件（D:\MoeKoeMusic）保持一致，
+  // 同时避开旧版 exe 不认 "~" 时会建出字面量 "~" 目录的坑。
+  // 用户用弹窗里的「选择」改过的值存在 localStorage odl_save_dir，优先级更高。
+  var IS_WIN = /^Win/i.test(String((typeof navigator !== 'undefined' && navigator.platform) || ''));
+  var SAVE_DIR = IS_WIN ? 'D:\\MoeKoeMusic' : '~/Music/MoeKoeMusic';
 
   function loadSaveDir() {
     try {
@@ -385,6 +390,128 @@
   function saveDir() {
     return loadSaveDir();
   }
+
+  // === ODL_SAVE_DIR_PATCH: 系统文件夹选择框（取消即静默，不可用才回退手动） ===
+  function setSaveDir(v) {
+    v = String(v || '').trim();
+    try {
+      if (v) localStorage.setItem('odl_save_dir', v);
+      else localStorage.removeItem('odl_save_dir');
+    } catch (e) {}
+    refreshSaveDirUI();
+  }
+
+  function refreshSaveDirUI() {
+    var nodes = document.querySelectorAll('#odl-panel .odl-dir-text');
+    for (var i = 0; i < nodes.length; i++) {
+      nodes[i].textContent = saveDir();
+      nodes[i].setAttribute('title', saveDir());
+    }
+  }
+
+  // 走主世界桥 → preload 的 electronAPI.showOpenDialog → 主进程 dialog.showOpenDialog，
+  // 弹原生「打开文件夹」面板，能直接选外接硬盘 / U 盘。
+  // 返回值：{ path: 选中的绝对路径, unavailable: 是否属于「框弹不出来」这类硬失败 }
+  function pickDirWithDialog() {
+    return new Promise(function (resolve) {
+      var id = 'dlg-' + (++bridgeSeq);
+      var done = false;
+      function finish(path, unavailable) {
+        if (done) return;
+        done = true;
+        window.removeEventListener('message', onMsg);
+        clearTimeout(timer);
+        resolve({ path: path || '', unavailable: !!unavailable });
+      }
+      function onMsg(ev) {
+        var d = ev.data;
+        if (!d || d.__odl !== 'bridge-res' || d.id !== id) return;
+        var pl = d.payload || {};
+        if (pl.__err) { warn('系统选择框不可用', String(pl.__err)); return finish('', true); }
+        var r = pl.res || {};
+        // 用户点了取消 → 正常静默返回，不再骚扰
+        finish(r && r.success && r.filePath ? String(r.filePath) : '', false);
+      }
+      var timer = setTimeout(function () { finish('', true); }, 180000);
+      window.addEventListener('message', onMsg);
+      window.postMessage({
+        __odl: 'bridge-req',
+        id: id,
+        path: '__odl_show_open_dialog',
+        payload: { properties: ['openDirectory', 'createDirectory'] }
+      }, '*');
+    });
+  }
+
+  function bindDirEdit(panel) {
+    function closeBox(box) { if (box && box.parentNode) box.parentNode.removeChild(box); }
+
+    // 只在系统框根本调不出来（旧客户端 / 桥报错 / 超时）时才会用到
+    function openManualBox(row) {
+      if (!row || row.querySelector('.odl-dir-box')) return;
+      var box = document.createElement('div');
+      box.className = 'odl-dir-box';
+      box.style.cssText = 'display:flex;gap:6px;align-items:center;margin-top:6px;flex-wrap:wrap;width:100%';
+      box.innerHTML =
+        '<input class="odl-dir-input" type="text" spellcheck="false" autocomplete="off" ' +
+        'style="flex:1;min-width:200px;padding:3px 8px;font-size:12px;border-radius:6px;' +
+        'border:1px solid rgba(255,255,255,.25);background:rgba(255,255,255,.08);color:inherit" ' +
+        'placeholder="~/Music/MoeKoeMusic 或 /Volumes/SSD/音乐">' +
+        '<button class="odl-mini odl-dir-ok" type="button">确定</button>' +
+        '<button class="odl-mini odl-dir-default" type="button">恢复默认</button>' +
+        '<button class="odl-mini odl-dir-cancel" type="button">取消</button>';
+
+      var input = box.querySelector('.odl-dir-input');
+      input.value = saveDir();
+      row.appendChild(box);
+      try { input.focus(); input.select(); } catch (err) {}
+
+      function commit() {
+        var v = String(input.value || '').trim();
+        if (v) setSaveDir(v);
+        closeBox(box);
+      }
+      box.querySelector('.odl-dir-ok').addEventListener('click', function (ev) {
+        ev.preventDefault(); ev.stopPropagation(); commit();
+      });
+      box.querySelector('.odl-dir-default').addEventListener('click', function (ev) {
+        ev.preventDefault(); ev.stopPropagation(); setSaveDir(''); closeBox(box);
+      });
+      box.querySelector('.odl-dir-cancel').addEventListener('click', function (ev) {
+        ev.preventDefault(); ev.stopPropagation(); closeBox(box);
+      });
+      input.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Enter') { ev.preventDefault(); commit(); }
+        else if (ev.key === 'Escape') { ev.preventDefault(); closeBox(box); }
+      });
+    }
+
+    var editors = panel.querySelectorAll('.odl-dir-edit');
+    for (var i = 0; i < editors.length; i++) {
+      (function (btn) {
+        btn.addEventListener('click', function (e) {
+          e.preventDefault(); e.stopPropagation();
+          var row = btn.closest ? btn.closest('.odl-savedir') : null;
+          if (!row || row.querySelector('.odl-dir-box')) return;
+
+          var label = btn.textContent;
+          btn.disabled = true;
+          btn.textContent = '打开中…';
+          pickDirWithDialog().then(function (r) {
+            btn.disabled = false;
+            btn.textContent = label;
+            if (r.path) setSaveDir(r.path);
+            else if (r.unavailable) openManualBox(row);
+          }).catch(function () {
+            btn.disabled = false;
+            btn.textContent = label;
+            openManualBox(row);
+          });
+        });
+      })(editors[i]);
+    }
+  }
+  // === /ODL_SAVE_DIR_PATCH ===
 
   var nhSeq = 0;
 
@@ -920,6 +1047,8 @@
       '<button class="odl-lyric" id="odl-lyric" title="导出 .srt">提取歌词</button></div>';
     html += '<div class="odl-row"><label class="odl-check"><input type="checkbox" id="odl-auto-lyric">' +
       '下载时顺带导出歌词（.srt）</label></div>';
+    html += '<div class="odl-savedir">保存到 <b class="odl-dir-text">' + escapeHtml(saveDir()) + '</b>' +
+      '<button class="odl-mini odl-dir-edit" type="button" title="弹出系统文件夹选择框">选择</button></div>';
     html += '<div class="odl-status" id="odl-status">就绪</div>';
     html += '</div>';
 
@@ -950,13 +1079,16 @@
       '<button class="odl-mini" id="odl-retry">只重试失败的</button>' +
       '<span class="odl-count" id="odl-retry-n"></span></div>';
     html += '<div class="odl-diag odl-hidden" id="odl-diag"></div>';
-    html += '<div class="odl-savedir">保存到 <b id="odl-dir-text">' + escapeHtml(saveDir()) + '</b>' +
+    html += '<div class="odl-savedir">保存到 <b class="odl-dir-text">' + escapeHtml(saveDir()) + '</b>' +
+      '<button class="odl-mini odl-dir-edit" type="button" title="弹出系统文件夹选择框">选择</button>' +
       '<span class="odl-host-flag" id="odl-host-flag">检测本地程序…</span></div>';
     html += '<div class="odl-status" id="odl-status2">就绪</div>';
     html += '</div>';
 
     panel.innerHTML = html;
     document.body.appendChild(panel);
+
+    bindDirEdit(panel);  // ODL_SAVE_DIR_PATCH
 
     // 标题栏拖拽移动面板（关闭按钮除外）。
     (function makeDraggable(p) {
