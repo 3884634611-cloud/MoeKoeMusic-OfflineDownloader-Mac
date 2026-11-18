@@ -860,7 +860,7 @@
     var r = await apiGet('/user/playlist', { pagesize: 100, t: localStorage.getItem('t') || '' });
     if (r.status !== 1) throw new Error('歌单列表获取失败');
     var info = (r.data && r.data.info) || [];
-    var mineUid = (JSON.parse(localStorage.getItem('MoeData') || '{}').UserInfo || {}).userid;
+    var mineUid = myUid();
     var map = {};
     var list = (Array.isArray(info) ? info : []).map(function (p) {
       var gid = p.global_collection_id || p.list_create_gid || '';
