@@ -401,11 +401,44 @@
     refreshSaveDirUI();
   }
 
+  function hasDirOverride() {
+    try {
+      var v = localStorage.getItem('odl_save_dir');
+      return !!(v && v.trim());
+    } catch (e) { return false; }
+  }
+
+  // 提示写到当前页签自己的状态行；3 秒后若没有别处更新就退回「就绪」，
+  // 避免目录提示长期占着下载进度那一行。
+  function dirHint(anchor, text, kind) {
+    try {
+      var row = anchor && anchor.closest ? anchor.closest('.odl-savedir') : null;
+      var box = row && row.parentNode ? row.parentNode : null;
+      var st = box ? box.querySelector('.odl-status') : null;
+      if (!st) return;
+      var seq = (st.__odlSeq = (st.__odlSeq || 0) + 1);
+      st.textContent = text;
+      st.className = 'odl-status' + (kind === 'err' ? ' odl-err' : kind === 'ok' ? ' odl-ok' : '');
+      setTimeout(function () {
+        if (st.__odlSeq !== seq) return;   // 期间有别的更新，别抢回来
+        if (batch.running) return;         // 下载 / 提歌词中，交给进度文案
+        st.textContent = '就绪';
+        st.className = 'odl-status';
+      }, 3000);
+    } catch (e) {}
+  }
+
   function refreshSaveDirUI() {
     var nodes = document.querySelectorAll('#odl-panel .odl-dir-text');
     for (var i = 0; i < nodes.length; i++) {
       nodes[i].textContent = saveDir();
       nodes[i].setAttribute('title', saveDir());
+    }
+    // 只有存在覆盖值时才给「恢复默认」，否则按钮恒在但永远没用，反而误导。
+    var resets = document.querySelectorAll('#odl-panel .odl-dir-reset');
+    var on = hasDirOverride();
+    for (var j = 0; j < resets.length; j++) {
+      resets[j].classList.toggle('odl-hidden', !on);
     }
   }
 
@@ -486,11 +519,44 @@
       });
     }
 
+    var resets = panel.querySelectorAll('.odl-dir-reset');
+    for (var k = 0; k < resets.length; k++) {
+      (function (btn) {
+        btn.addEventListener('click', function (e) {
+          e.preventDefault(); e.stopPropagation();
+          if (batch.running) {
+            dirHint(btn, '下载进行中，结束后再改保存目录', 'err');
+            return;
+          }
+          // 两步确认：外接盘路径点错就没了，第一次点只上膛。
+          if (!btn.__odlArm) {
+            btn.__odlArm = true;
+            btn.textContent = '确认恢复？';
+            dirHint(btn, '再点一次回到默认目录', '');
+            setTimeout(function () {
+              if (!btn.__odlArm) return;
+              btn.__odlArm = false;
+              btn.textContent = '恢复默认';
+            }, 3000);
+            return;
+          }
+          btn.__odlArm = false;
+          btn.textContent = '恢复默认';
+          setSaveDir('');   // 清掉 odl_save_dir，回落到 SAVE_DIR 常量
+          dirHint(btn, '已恢复默认：' + saveDir(), 'ok');
+        });
+      })(resets[k]);
+    }
+
     var editors = panel.querySelectorAll('.odl-dir-edit');
     for (var i = 0; i < editors.length; i++) {
       (function (btn) {
         btn.addEventListener('click', function (e) {
           e.preventDefault(); e.stopPropagation();
+          if (batch.running) {
+            dirHint(btn, '下载进行中，结束后再改保存目录', 'err');
+            return;
+          }
           var row = btn.closest ? btn.closest('.odl-savedir') : null;
           if (!row || row.querySelector('.odl-dir-box')) return;
 
@@ -500,8 +566,15 @@
           pickDirWithDialog().then(function (r) {
             btn.disabled = false;
             btn.textContent = label;
-            if (r.path) setSaveDir(r.path);
-            else if (r.unavailable) openManualBox(row);
+            if (r.path) {
+              setSaveDir(r.path);
+              dirHint(btn, '已改为 ' + saveDir(), 'ok');
+            } else if (!r.unavailable && !r.path) {
+              // 用户点了取消：不做事，但给一句反馈，避免「点了没反应」的错觉
+              dirHint(btn, '已取消，保存目录未变：' + saveDir());
+            } else {
+              openManualBox(row);
+            }
           }).catch(function () {
             btn.disabled = false;
             btn.textContent = label;
@@ -1048,7 +1121,9 @@
     html += '<div class="odl-row"><label class="odl-check"><input type="checkbox" id="odl-auto-lyric">' +
       '下载时顺带导出歌词（.srt）</label></div>';
     html += '<div class="odl-savedir">保存到 <b class="odl-dir-text">' + escapeHtml(saveDir()) + '</b>' +
-      '<button class="odl-mini odl-dir-edit" type="button" title="弹出系统文件夹选择框">选择</button></div>';
+      '<button class="odl-mini odl-dir-edit" type="button" title="弹出系统文件夹选择框">选择</button>' +
+      '<button class="odl-mini odl-dir-reset odl-hidden" type="button" title="回到默认目录 ' +
+      escapeHtml(SAVE_DIR) + '">恢复默认</button></div>';
     html += '<div class="odl-status" id="odl-status">就绪</div>';
     html += '</div>';
 
@@ -1081,6 +1156,8 @@
     html += '<div class="odl-diag odl-hidden" id="odl-diag"></div>';
     html += '<div class="odl-savedir">保存到 <b class="odl-dir-text">' + escapeHtml(saveDir()) + '</b>' +
       '<button class="odl-mini odl-dir-edit" type="button" title="弹出系统文件夹选择框">选择</button>' +
+      '<button class="odl-mini odl-dir-reset odl-hidden" type="button" title="回到默认目录 ' +
+      escapeHtml(SAVE_DIR) + '">恢复默认</button>' +
       '<span class="odl-host-flag" id="odl-host-flag">检测本地程序…</span></div>';
     html += '<div class="odl-status" id="odl-status2">就绪</div>';
     html += '</div>';
@@ -1089,6 +1166,7 @@
     document.body.appendChild(panel);
 
     bindDirEdit(panel);  // ODL_SAVE_DIR_PATCH
+    refreshSaveDirUI();  // 进面板时按当前是否有覆盖值决定「恢复默认」显隐
 
     // 标题栏拖拽移动面板（关闭按钮除外）。
     (function makeDraggable(p) {

@@ -643,3 +643,10 @@ html.dark .odl-toggle {
 .odl-dir-box {
   flex: 1 1 100%;
 }
+
+/* === 1.2.2：保存目录行补「恢复默认」后的收缩保护 === */
+.odl-savedir .odl-dir-edit,
+.odl-savedir .odl-dir-reset {
+  flex: none;
+  white-space: nowrap;
+}

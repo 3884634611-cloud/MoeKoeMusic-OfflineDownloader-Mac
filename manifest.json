@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "离线下载器（macOS / Windows）",
   "plugin_id": "offline-downloader-mac",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "离线下载器：单曲 + 歌单批量下载；四档音质；直接写盘不弹保存框，保存目录可在弹窗内改为任意磁盘（含外接盘 / U 盘）。",
   "moekoe": true,
   "minversion": "1.7.0",
